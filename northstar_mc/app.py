@@ -21,6 +21,8 @@ COLORS = PROJECT_COLORS
 CEILING_COLOR = MUTED  # the deck draws the ceiling as a thin gray dashed line
 BENCH_LABEL = {"WTI": "WTI", "Brent": "Brent", "HH": "Henry Hub", "TTF": "TTF", "OPIS": "OPIS NGL"}
 BUILD_NOTE = "Peak falls in a build year (no production yet): it is driven by build capex, not by Exhibit 5-9 inputs."
+RUN_LABEL = "Run Monte Carlo"
+RESULTS_ANCHOR = "mc-results"
 
 st.set_page_config(page_title="NorthStar leverage Monte Carlo", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
@@ -105,7 +107,7 @@ def mc_config(sb) -> tuple[ShockConfig, bool]:
     cfg.extra_levers = sb.toggle("Include extra levers (capex, delay, EBITDA growth)", False)
     cfg.tariff_event = sb.toggle("Include tariff event risk (steel and materials)", False)
     cfg.opex_growth = sb.toggle("Include unexpected opex growth", False)
-    return cfg, sb.button("Run simulation", type="primary", width="stretch")
+    return cfg, sb.button(RUN_LABEL, type="primary", width="stretch", key="run_sidebar")
 
 
 # ---------- charts ----------
@@ -241,9 +243,42 @@ SUMMARY_FMT = {"Pass rate": "{:.1%}", "Fail rate": "{:.1%}", "Peak in build year
                "Post-build breach rate": "{:.1%}", "Most common peak year": "{:.0f}", "Most common breach year": "{:.0f}"}
 
 
-def mc_section(sim: SimResults, tor: pd.DataFrame, ceiling: float) -> None:
+def _fingerprint(cfg: ShockConfig) -> str:
+    """Every Monte Carlo setting, to tell whether the stored results still match the sidebar."""
+    return repr(sorted(vars(cfg).items()))
+
+
+def mc_prompt(cfg: ShockConfig, sidebar_run: bool, case: CaseData) -> bool:
+    """Run bar near the top of the page: runs the Monte Carlo on request and says whether results are current.
+
+    Returns True when the stored results no longer match the sidebar settings.
+    """
+    with st.container(border=True):
+        msg_col, btn_col = st.columns([4, 1], vertical_alignment="center")
+        if btn_col.button(RUN_LABEL, type="primary", width="stretch", key="run_main") or sidebar_run:
+            with st.spinner("Running scenarios..."):
+                st.session_state["sim"] = run_monte_carlo(cfg, case)
+                st.session_state["tornado"] = tornado(cfg, case)
+                st.session_state["sim_fingerprint"] = _fingerprint(cfg)
+        sim = st.session_state.get("sim")
+        stale = sim is not None and st.session_state.get("sim_fingerprint") != _fingerprint(cfg)
+        if sim is None:
+            msg_col.markdown(f"To see results across thousands of random scenarios, choose the options under "
+                             f"*Monte Carlo settings* in the sidebar, then press **{RUN_LABEL}**.")
+        elif stale:
+            msg_col.markdown(f"**:orange[Monte Carlo results are out of date.]** Monte Carlo settings have changed "
+                             f"since the last run. Press **{RUN_LABEL}** to update them.")
+        else:
+            msg_col.markdown(f"**Monte Carlo results are up to date:** {sim.config.n_scenarios:,} scenarios, "
+                             f"seed {sim.config.seed}. [Jump to results ↓](#{RESULTS_ANCHOR})")
+    return stale
+
+
+def mc_section(sim: SimResults, tor: pd.DataFrame, ceiling: float, stale: bool) -> None:
     st.markdown(kicker("Monte Carlo"), unsafe_allow_html=True)
-    st.subheader(f"Results across {sim.config.n_scenarios:,} scenarios (seed {sim.config.seed})")
+    st.subheader(f"Results across {sim.config.n_scenarios:,} scenarios (seed {sim.config.seed})", anchor=RESULTS_ANCHOR)
+    if stale:
+        st.warning(f"These results use earlier settings. Press **{RUN_LABEL}** at the top of the page to update them.")
     cols = ["Project", "Pass rate", "Peak P50", "Peak P95", "Most common breach year", "Peak in build year (share)",
             "Post-build peak P50", "Post-build peak P95", "Post-build breach rate"]
     st.dataframe(sim.summary[cols].style.format(SUMMARY_FMT | {c: "{:.3f}" for c in cols if "P50" in c or "P95" in c},
@@ -273,27 +308,24 @@ def main() -> None:
     case = get_case()
     ceiling = case.corporate.ceiling
     st.markdown(kicker("Leverage sensitivity") + legend_dots(), unsafe_allow_html=True)
-    st.title(f"How far can each project bend before NorthStar breaks the {ceiling:.2f}x ceiling?")
+    st.title(f"NorthStar Net Debt / Adj. EBITDA Sensitivity Analysis")
     st.caption(f"Net debt / Adj. EBITDA must stay at or below {ceiling:.2f}x in every year. "
                "Sliders update the scenario live; the Monte Carlo runs the same model function.")
     model_box, slider_box, mc_box = st.sidebar.container(), st.sidebar.container(), st.sidebar.container()
-    cfg, run = mc_config(mc_box)  # read first: the tariff slider uses its material shares
+    cfg, sidebar_run = mc_config(mc_box)  # read first: the tariff slider uses its material shares
     baseline_settings(case, cfg, model_box)
     shocks = slider_shocks(case, cfg, slider_box)
     results = run_all(case, shocks)
+    stale = mc_prompt(cfg, sidebar_run, case)
     st.markdown(kicker("Current scenario"), unsafe_allow_html=True)
     badges(results)
     ratio_col, ebitda_col = st.columns(2)
     chart(scenario_chart(results, base_series("ratio"), ceiling), ratio_col)
     chart(ebitda_chart(results, base_series("ebitda")), ebitda_col)
-    if run:
-        with st.spinner("Running scenarios..."):
-            st.session_state["sim"] = run_monte_carlo(cfg, case)
-            st.session_state["tornado"] = tornado(cfg, case)
     if "sim" in st.session_state:
-        mc_section(st.session_state["sim"], st.session_state["tornado"], ceiling)
+        mc_section(st.session_state["sim"], st.session_state["tornado"], ceiling, stale)
     else:
-        st.caption("Set the Monte Carlo options in the sidebar and press **Run simulation**.")
+        st.caption(f"Monte Carlo results appear here after you press **{RUN_LABEL}** at the top of the page.")
     st.markdown('<div class="source">Source: team model (Bison, Fennec and Puma DCF tabs); case Exhibits 1, 2, 5-9 '
                 'and 12. Year-end net debt / Adj. EBITDA.</div>', unsafe_allow_html=True)
 
