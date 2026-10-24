@@ -39,8 +39,23 @@ def base_ratios() -> dict[str, np.ndarray]:
 
 
 # ---------- sidebar ----------
+def baseline_settings(case: CaseData, cfg: ShockConfig, sb) -> None:
+    """Applies to both the slider scenario and the Monte Carlo."""
+    sb.header("Model")
+    mix = case.corporate.revenue_mix
+    cfg.baseline_financials = sb.toggle(
+        "Factor baseline financials", False,
+        help="Off (workbook): NorthStar's baseline EBITDA and FCF follow Exhibit 12 whatever prices do. "
+             f"On: price moves also change baseline revenue (Exhibit 2 2026: oil ${mix['oil']:,.0f}MM on "
+             f"50% WTI / 50% Brent, gas ${mix['gas']:,.0f}MM on Henry Hub, NGL ${mix['ngl']:,.0f}MM on OPIS), "
+             "which flows to baseline EBITDA and, after tax, to base FCF.")
+    if cfg.baseline_financials:
+        cfg.baseline_passthrough = sb.number_input("Share of revenue change reaching EBITDA", 0.0, 1.0,
+                                                   cfg.baseline_passthrough, 0.05)
+
+
 def slider_shocks(case: CaseData, cfg: ShockConfig, sb) -> Shocks:
-    s = base_shocks(case)
+    s = base_shocks(case, cfg=cfg)
     sb.header("Scenario sliders")
     sb.caption("Prices (multiplier on the Exhibit 9 curve)")
     for b in BENCHMARKS:
@@ -244,8 +259,9 @@ def main() -> None:
     st.title(f"How far can each project bend before NorthStar breaks the {ceiling:.2f}x ceiling?")
     st.caption(f"Net debt / Adj. EBITDA must stay at or below {ceiling:.2f}x in every year. "
                "Sliders update the scenario live; the Monte Carlo runs the same model function.")
-    slider_box, mc_box = st.sidebar.container(), st.sidebar.container()
+    model_box, slider_box, mc_box = st.sidebar.container(), st.sidebar.container(), st.sidebar.container()
     cfg, run = mc_config(mc_box)  # read first: the tariff slider uses its material shares
+    baseline_settings(case, cfg, model_box)
     shocks = slider_shocks(case, cfg, slider_box)
     results = run_all(case, shocks)
     st.markdown(kicker("Slider scenario"), unsafe_allow_html=True)

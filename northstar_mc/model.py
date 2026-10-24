@@ -10,8 +10,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from data_loader import BASE_YEAR, FIRST_YEAR, CaseData, Project
+from data_loader import BASE_YEAR, BASELINE_PRICE_MAP, FIRST_YEAR, CaseData, Project
 from shocks import Shocks
+
+RATIO_CAP = 10.0  # ratio reported when total EBITDA <= 0 (no meaningful multiple; always a breach)
 
 
 @dataclass
@@ -123,19 +125,34 @@ def operating_model(case: CaseData, p: Project, s: Shocks) -> dict[str, np.ndarr
     return {"production": production, "revenue": revenue, "ebitda": ebitda, "fcf": fcf}
 
 
+def baseline_price_impact(case: CaseData, p: Project, s: Shocks) -> np.ndarray:
+    """Change in NorthStar's baseline EBITDA when prices leave the Exhibit 9 curve.
+
+    Exhibit 2 2026 revenue by product x the price deviation of its benchmarks, grown with
+    baseline EBITDA. Zero unless baseline financials are factored in (passthrough > 0).
+    """
+    t = p.n_years
+    dev = sum(case.corporate.revenue_mix[k] * w * (s.price[b][:, :t] - 1)
+              for k, weights in BASELINE_PRICE_MAP.items() for b, w in weights.items())
+    growth = (1 + s.ebitda_growth[:, None]) ** (p.years[None, :] - BASE_YEAR)
+    return s.baseline_passthrough * growth * dev
+
+
 def leverage_test(case: CaseData, p: Project, s: Shocks, ebitda: np.ndarray, fcf: np.ndarray) -> dict[str, np.ndarray]:
-    """DCF rows 54-65."""
+    """DCF rows 54-65, plus the price impact on the baseline business when it is factored in."""
     corp = case.corporate
     years = p.years[None, :]
-    baseline = corp.adj_ebitda_0 * (1 + s.ebitda_growth[:, None]) ** (years - BASE_YEAR)
+    impact = baseline_price_impact(case, p, s)
+    baseline = corp.adj_ebitda_0 * (1 + s.ebitda_growth[:, None]) ** (years - BASE_YEAR) + impact
     total_ebitda = baseline + ebitda
-    base_fcf = corp.base_fcf * (1 + corp.fcf_growth) ** (years - FIRST_YEAR)
+    base_fcf = corp.base_fcf * (1 + corp.fcf_growth) ** (years - FIRST_YEAR) + (1 - corp.tax_rate) * impact
     dividends = corp.dividends_0 * (1 + corp.dividend_growth) ** (years - BASE_YEAR)
     net_debt = corp.net_debt_0 + np.cumsum(-base_fcf + dividends - fcf, axis=1)
+    ratio = np.divide(net_debt, total_ebitda, out=np.full_like(net_debt, RATIO_CAP), where=total_ebitda > 0)
     return {
         "total_ebitda": total_ebitda,
         "net_debt": net_debt,
-        "ratio": net_debt / total_ebitda,
+        "ratio": np.minimum(ratio, RATIO_CAP),
         "headroom": corp.ceiling * total_ebitda - net_debt,
     }
 

@@ -32,6 +32,15 @@ PRICE_MAP = {
     "Puma": ("Brent", "HH", "OPIS"),
 }
 
+# [ASSUMPTION] benchmarks NorthStar's existing business sells into, weight per Exhibit 2 revenue line.
+# Used only when baseline financials are factored in. Exhibit 2 rows 6-8 give the revenue split.
+BASELINE_PRICE_MAP = {
+    "oil": {"WTI": 0.5, "Brent": 0.5},
+    "gas": {"HH": 1.0},
+    "ngl": {"OPIS": 1.0},
+}
+REVENUE_ROWS = {"oil": 6, "gas": 7, "ngl": 8}
+
 # Production sheet + last column; Exhibit 8 crude/gas/NGL rows; Exhibit 1 first assumption row.
 PRODUCTION_SHEETS = {"Bison": ("Exhibit 5", "N"), "Fennec": ("Exhibit 6", "U"), "Puma": ("Exhibit 7", "AG")}
 MIX_ROWS = {"Bison": (5, 6, 7), "Fennec": (8, 9, 10), "Puma": (11, 12, 13)}
@@ -76,6 +85,7 @@ class Corporate:
     base_fcf: float            # D8, 2027 value
     ceiling: float             # D9, "1.75x"
     tax_rate: float            # Exhibit 1 C6
+    revenue_mix: dict[str, float]  # Exhibit 2 E6:E8, 2026 oil / gas / NGL revenue
 
 
 @dataclass(frozen=True)
@@ -169,6 +179,7 @@ def _load_corporate(wb: openpyxl.Workbook) -> Corporate:
         base_fcf=float(e12["D8"].value),
         ceiling=float(str(e12["D9"].value).lower().replace("x", "").strip()),
         tax_rate=float(wb["Exhibit 1"]["C6"].value),
+        revenue_mix={k: float(e2[f"E{r}"].value) for k, r in REVENUE_ROWS.items()},
     )
 
 

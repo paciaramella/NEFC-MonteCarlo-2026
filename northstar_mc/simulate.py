@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from data_loader import BENCHMARKS, PROJECTS, CaseData, load_case
+from data_loader import BASELINE_PRICE_MAP, BENCHMARKS, PROJECTS, CaseData, load_case
 from model import ProjectResult, run_all
 from shocks import NO_TARIFF, ShockConfig, Shocks, base_shocks, draw_shocks, input_quantiles, set_tariff
 
@@ -118,30 +118,31 @@ def _set_input(s: Shocks, key: str, value: float, cfg: ShockConfig) -> None:
         set_tariff(s, cfg, cfg.tariff_window[0], cfg.tariff_rate)
 
 
-def _relevant(key: str, project: str, case: CaseData) -> bool:
+def _relevant(key: str, project: str, case: CaseData, cfg: ShockConfig) -> bool:
     kind, _, target = key.partition(" ")
     if kind in ("Volume", "Capex", "Delay"):
         return target == project
     if kind == "Price":
         b = case.projects[project].benchmarks
-        return target in b or (target == "OPIS" and "EU_NGL" in b)
+        in_baseline = cfg.baseline_financials and any(target in w for w in BASELINE_PRICE_MAP.values())
+        return target in b or (target == "OPIS" and "EU_NGL" in b) or in_baseline
     return True
 
 
 def tornado(cfg: ShockConfig, case: CaseData | None = None, lo_q: float = 0.10, hi_q: float = 0.90) -> pd.DataFrame:
     """Base case, one input at a time moved to its P10 and P90; change in peak ratios."""
     case = case or load_case()
-    base = run_all(case, base_shocks(case))
+    base = run_all(case, base_shocks(case, cfg=cfg))
     lows, highs = input_quantiles(cfg, lo_q), input_quantiles(cfg, hi_q)
     rows = []
     for key in lows:
         extra = key.split(" ")[0] in ("Capex", "Delay") or key in EXTRA_KEYS
         for project in PROJECTS:
-            if not _relevant(key, project, case):
+            if not _relevant(key, project, case, cfg):
                 continue
             out = {}
             for side, value in (("low", lows[key]), ("high", highs[key])):
-                s = base_shocks(case)
+                s = base_shocks(case, cfg=cfg)
                 _set_input(s, key, value, cfg)
                 r = run_all(case, s)[project]
                 out[side] = (value, r.peak[0], r.post_build_peak[0])
@@ -188,11 +189,14 @@ def main() -> None:
     ap.add_argument("--opex-growth", action="store_true", help="unexpected opex escalation")
     ap.add_argument("--year-noise", action="store_true")
     ap.add_argument("--mean-reverting", action="store_true")
+    ap.add_argument("--baseline-financials", action="store_true",
+                    help="prices also move NorthStar's baseline EBITDA and FCF")
     ap.add_argument("--out", default="outputs")
     a = ap.parse_args()
     cfg = ShockConfig(n_scenarios=a.scenarios, seed=a.seed, extra_levers=a.extra_levers,
                       volume_year_noise=a.year_noise, mean_reverting_prices=a.mean_reverting,
-                      tariff_event=a.tariff, opex_growth=a.opex_growth)
+                      tariff_event=a.tariff, opex_growth=a.opex_growth,
+                      baseline_financials=a.baseline_financials)
     sim = run_monte_carlo(cfg)
     tor = tornado(cfg)
     out = Path(a.out)

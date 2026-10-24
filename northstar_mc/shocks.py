@@ -61,6 +61,9 @@ class ShockConfig:
     opex_growth_mean: float = 0.01             # unexpected opex escalation per year, above plan
     opex_growth_sigma: float = 0.015
     opex_growth_clip: tuple[float, float] = (-0.02, 0.08)
+    # F. factor baseline financials: prices also move NorthStar's own EBITDA and FCF (off = workbook)
+    baseline_financials: bool = False
+    baseline_passthrough: float = 1.0          # share of the baseline revenue change that reaches EBITDA
 
 
 @dataclass
@@ -76,6 +79,7 @@ class Shocks:
     tariff_capex_uplift: np.ndarray  # tariff rate x capex material share, from tariff_year on
     tariff_opex_uplift: np.ndarray   # tariff rate x opex material share, from tariff_year on
     opex_growth: np.ndarray        # unexpected opex escalation per year from 2027
+    baseline_passthrough: float = 0.0  # 0 = baseline EBITDA and FCF ignore prices, as in the workbook
 
     @property
     def n(self) -> int:
@@ -87,8 +91,8 @@ def lognormal_mean_one(z: np.ndarray, sigma: float) -> np.ndarray:
     return np.exp(sigma * z - 0.5 * sigma**2)
 
 
-def base_shocks(case: CaseData, n: int = 1) -> Shocks:
-    """All multipliers at 1, no shift, no delay, Exhibit 12 growth."""
+def base_shocks(case: CaseData, n: int = 1, cfg: ShockConfig | None = None) -> Shocks:
+    """All multipliers at 1, no shift, no delay, Exhibit 12 growth. cfg only sets the baseline link."""
     t = case.max_years
     return Shocks(
         volume={p: np.ones((n, t)) for p in PROJECTS},
@@ -101,6 +105,7 @@ def base_shocks(case: CaseData, n: int = 1) -> Shocks:
         tariff_capex_uplift=np.zeros(n),
         tariff_opex_uplift=np.zeros(n),
         opex_growth=np.zeros(n),
+        baseline_passthrough=cfg.baseline_passthrough if cfg and cfg.baseline_financials else 0.0,
     )
 
 
@@ -173,7 +178,7 @@ def draw_shocks(case: CaseData, cfg: ShockConfig) -> Shocks:
     u_tariff_year = rng.random(n)
     z_opex = rng.standard_normal(n)
 
-    shocks = base_shocks(case, n)
+    shocks = base_shocks(case, n, cfg)
     shocks.volume = {
         p: _volume(cfg, z_vol[:, i], z_vol_year[:, :, i], cfg.volume_sigma[p]) for i, p in enumerate(PROJECTS)
     }
