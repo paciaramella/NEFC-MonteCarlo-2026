@@ -11,6 +11,7 @@ pip install -r requirements.txt
 python -m pytest                 # baseline must match the workbook DCF tabs (8 tests)
 python simulate.py               # 10,000 scenarios, writes outputs/scenarios.csv + outputs/summary.xlsx
 python simulate.py --extra-levers   # also vary capex overrun, first-production delay, EBITDA growth
+python simulate.py --tariff --opex-growth   # tariff event risk and unexpected opex growth (combine freely)
 streamlit run app.py             # slider UI + Monte Carlo
 ```
 
@@ -27,6 +28,7 @@ All exhibit numbers come from the workbook, so editing an exhibit changes the mo
 | `shocks.py` | Random draws. Every assumption below is a field on `ShockConfig` |
 | `simulate.py` | Runs N scenarios, summary stats, per-year fan data, tornado, CSV / Excel export |
 | `app.py` | Streamlit UI. The slider scenario uses the same `run_all` function as the Monte Carlo |
+| `theme.py`, `.streamlit/config.toml` | Look matched to the NEFC 2026 deck: Cambria headings, Arial body, teal accent, Bison teal / Fennec blue / Puma red, gray dashed ceiling |
 | `tests/test_baseline.py` | Base case vs. workbook: every year's EBITDA, FCF, net debt and ratio to 1e-6 |
 
 ## Assumptions (defaults, all in `shocks.ShockConfig`)
@@ -45,6 +47,9 @@ All exhibit numbers come from the workbook, so editing an exhibit changes the mo
 | Capex overrun (extra lever) | off; triangular(0.95, 1.05, 1.40) × Exhibit 1 cost. Also scales depreciation |
 | First-production delay (extra lever) | off; 0 / 1 / 2 years with 70% / 20% / 10%. Shifts production, mix and depreciation right; capex keeps its schedule; tail truncated; decommissioning stays in the original final year |
 | Baseline EBITDA growth (extra lever) | off; normal(3%, 1.5 pp) |
+| Tariff event (own toggle) | off; 30% chance per scenario, start year uniform 2027-2036, one event shared by all projects, lasts for the rest of the project life |
+| Tariff impact | 25% duty on steel and materials: 35% of development capex and 10% of opex are materials, so capex spent from the start year rises 8.75% and opex 2.5%. Higher capex also raises depreciation (tax) |
+| Unexpected opex growth (own toggle) | off; normal(1%/yr, 1.5 pp), clipped to [-2%, 8%]; compounds from 2027 on direct opex, overhead and midstream $/boe, shared by all projects |
 | Tornado | each input moved alone to its own P10 and P90, everything else at base |
 
 Workbook simplifications kept: baseline EBITDA and base FCF do not move with prices, no interest
@@ -68,6 +73,21 @@ With the extra levers on:
 | Bison | 99.97% | 1.653x | 1.699x | 2027 | 1.571x | 0.01% |
 | Fennec | 68.9% | 1.710x | 1.848x | 2029 | 1.620x | 0.5% |
 | Puma | 0.16% | 2.203x | 2.520x | 2031 | 1.935x | 20.1% |
+
+Tariff event and opex growth levers (10,000 scenarios, seed 2026):
+
+| Run | Bison pass | Fennec pass | Puma pass | Puma post-build breach rate |
+|---|---|---|---|---|
+| Exhibits 5-9 only | 100% | 100% | 0% | 3.5% |
+| + tariff event | 100% | 100% | 0% | 4.3% |
+| + opex growth | 100% | 100% | 0% | 4.4% |
+| + tariff and opex growth | 100% | 100% | 0% | 5.2% |
+| All extra levers on | 99.96% | 68.1% | 0.16% | 22.6% |
+
+A 25% tariff starting in 2027 lifts Fennec's 2029 peak from 1.670x to 1.696x and Puma's from 2.090x to
+2.164x; Fennec only fails at a tariff of roughly 75%+ on materials. Opex growth hits after first oil, so
+it moves the post-build peak (Puma 1.488x to 1.537x at 5%/yr), not the build-year peak. Above about
+8%/yr, Puma's late-life opex outruns revenue and its ratio climbs again.
 
 **Reading it:** every project's peak falls in a build year, before first production, so the
 Exhibit 5-9 inputs cannot move pass/fail. The peak is set by build capex and NorthStar's baseline.

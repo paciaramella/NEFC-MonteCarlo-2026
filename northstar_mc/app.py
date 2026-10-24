@@ -10,17 +10,21 @@ import streamlit as st
 
 from data_loader import BENCHMARKS, PROJECTS, CaseData, load_case
 from model import ProjectResult, run_all
-from shocks import ShockConfig, Shocks, base_shocks
+from shocks import ShockConfig, Shocks, base_shocks, set_tariff
 from simulate import SimResults, excel_bytes, run_monte_carlo, tornado
+from theme import (CSS, HIGH_COLOR, INK, LOW_COLOR, MUTED, PROJECT_COLORS, PROJECT_SYMBOLS, RED, TEAL,
+                   kicker, legend_dots, register_template, style_figure)
 
 warnings.filterwarnings("ignore", category=UserWarning)  # openpyxl conditional-format notice
 
-COLORS = {"Bison": "#2a78d6", "Fennec": "#eb6834", "Puma": "#1baf7a"}
-CEILING_COLOR = "#e34948"
+COLORS = PROJECT_COLORS
+CEILING_COLOR = MUTED  # the deck draws the ceiling as a thin gray dashed line
 BENCH_LABEL = {"WTI": "WTI", "Brent": "Brent", "HH": "Henry Hub", "TTF": "TTF", "OPIS": "OPIS NGL"}
 BUILD_NOTE = "Peak falls in a build year (no production yet): it is driven by build capex, not by Exhibit 5-9 inputs."
 
 st.set_page_config(page_title="NorthStar leverage Monte Carlo", layout="wide")
+st.markdown(CSS, unsafe_allow_html=True)
+register_template()
 
 
 @st.cache_resource
@@ -35,8 +39,7 @@ def base_ratios() -> dict[str, np.ndarray]:
 
 
 # ---------- sidebar ----------
-def slider_shocks(case: CaseData) -> Shocks:
-    sb = st.sidebar
+def slider_shocks(case: CaseData, cfg: ShockConfig, sb) -> Shocks:
     s = base_shocks(case)
     sb.header("Scenario sliders")
     sb.caption("Prices (multiplier on the Exhibit 9 curve)")
@@ -52,56 +55,84 @@ def slider_shocks(case: CaseData) -> Shocks:
         for p in PROJECTS:
             s.delay[p][:] = st.slider(f"{p} first-production delay (years)", 0, 2, 0)
         s.ebitda_growth[:] = st.slider("Baseline EBITDA growth %", 0.0, 6.0, 3.0, 0.25) / 100
+        s.opex_growth[:] = st.slider("Unexpected opex growth %/yr (all projects)", -2.0, 10.0, 0.0, 0.5,
+                                     help="Escalation of direct opex, overhead and midstream $/boe above plan, "
+                                          "compounding from 2027.") / 100
+        if st.toggle("Tariff event on steel and materials", False, key="tariff_slider"):
+            year = st.slider("Tariff starts in", 2027, 2045, 2027)
+            rate = st.slider("Tariff rate on materials %", 5, 100, int(cfg.tariff_rate * 100), 5) / 100
+            set_tariff(s, cfg, year, rate)
+            st.caption(f"Raises the {cfg.capex_material_share:.0%} material share of development capex and the "
+                       f"{cfg.opex_material_share:.0%} material share of opex, from the start year onward.")
     return s
 
 
-def mc_config() -> tuple[ShockConfig, bool]:
-    sb = st.sidebar
+def mc_config(sb) -> tuple[ShockConfig, bool]:
     sb.header("Monte Carlo settings")
     cfg = ShockConfig()
     cfg.n_scenarios = int(sb.number_input("Scenarios", 100, 100_000, 10_000, 1_000))
     cfg.seed = int(sb.number_input("Seed", 0, 10**9, cfg.seed))
-    with sb.expander("Distribution σ values", expanded=False):
+    with sb.expander("Distribution settings", expanded=False):
         cfg.volume_sigma = {p: st.number_input(f"Volume σ {p}", 0.0, 0.5, v, 0.01) for p, v in cfg.volume_sigma.items()}
         cfg.crude_shift_sigma = st.number_input("Crude shift σ (pp)", 0.0, 10.0, 3.0, 0.5) / 100
         cfg.price_vol = {b: st.number_input(f"{BENCH_LABEL[b]} vol", 0.0, 1.0, v, 0.05) for b, v in cfg.price_vol.items()}
         cfg.volume_year_sigma = st.number_input("Year-by-year volume σ", 0.0, 0.2, cfg.volume_year_sigma, 0.01)
         cfg.ebitda_growth_sigma = st.number_input("EBITDA growth σ (pp)", 0.0, 5.0, 1.5, 0.25) / 100
+        st.caption("Tariff event")
+        cfg.tariff_probability = st.number_input("Chance of a tariff (2027-2036 start)", 0.0, 1.0, cfg.tariff_probability, 0.05)
+        cfg.tariff_rate = st.number_input("Tariff rate on materials", 0.0, 1.0, cfg.tariff_rate, 0.05)
+        cfg.capex_material_share = st.number_input("Material share of capex", 0.0, 1.0, cfg.capex_material_share, 0.05)
+        cfg.opex_material_share = st.number_input("Material share of opex", 0.0, 1.0, cfg.opex_material_share, 0.05)
+        st.caption("Unexpected opex growth")
+        cfg.opex_growth_mean = st.number_input("Opex growth mean (%/yr)", -2.0, 8.0, 1.0, 0.25) / 100
+        cfg.opex_growth_sigma = st.number_input("Opex growth σ (pp)", 0.0, 5.0, 1.5, 0.25) / 100
     cfg.volume_year_noise = sb.toggle("Year-by-year volume noise", False)
     cfg.mean_reverting_prices = sb.toggle("Mean-reverting prices (OU, 3y half-life)", False)
     cfg.extra_levers = sb.toggle("Include extra levers (capex, delay, EBITDA growth)", False)
+    cfg.tariff_event = sb.toggle("Include tariff event risk (steel and materials)", False)
+    cfg.opex_growth = sb.toggle("Include unexpected opex growth", False)
     return cfg, sb.button("Run simulation", type="primary", width="stretch")
 
 
 # ---------- charts ----------
 def ceiling_line(fig: go.Figure, ceiling: float, vertical: bool = False) -> None:
-    kw = dict(line_dash="dash", line_color=CEILING_COLOR, line_width=2, annotation_text=f"Ceiling {ceiling:.2f}x")
+    kw = dict(line_dash="dash", line_color=CEILING_COLOR, line_width=1.2, annotation_text=f"{ceiling:.2f}x ceiling",
+              annotation_font=dict(color=MUTED, size=11))
     if vertical:
-        fig.add_vline(x=ceiling, **kw)
+        fig.add_vline(x=ceiling, annotation_position="top right", **kw)
     else:
-        fig.add_hline(y=ceiling, annotation_position="top left", **kw)
+        fig.add_hline(y=ceiling, annotation_position="top right", **kw)
 
 
 def layout(fig: go.Figure, title: str, height: int = 420, ytitle: str = "Net debt / Adj. EBITDA (x)") -> go.Figure:
     fig.update_layout(title=title, height=height, hovermode="x unified", margin=dict(l=10, r=10, t=50, b=10),
                       legend=dict(orientation="h", y=-0.15), yaxis_title=ytitle)
-    fig.update_yaxes(tickformat=".2f", gridcolor="rgba(128,128,128,0.2)")
-    fig.update_xaxes(gridcolor="rgba(128,128,128,0.1)")
+    fig.update_yaxes(tickformat=".2f", ticksuffix="x" if ytitle.endswith("(x)") else "")
     return fig
+
+
+def chart(fig: go.Figure, where=st) -> None:
+    style_figure(fig)  # explicit values, so Streamlit's own chart theme cannot override the deck look
+    where.plotly_chart(fig, width="stretch", theme=None)
 
 
 def scenario_chart(results: dict[str, ProjectResult], base: dict[str, np.ndarray], ceiling: float) -> go.Figure:
     fig = go.Figure()
     for name, r in results.items():
         for y in r.years[r.breach[0]]:
-            fig.add_vrect(x0=y - 0.5, x1=y + 0.5, fillcolor=COLORS[name], opacity=0.10, line_width=0)
+            fig.add_vrect(x0=y - 0.5, x1=y + 0.5, fillcolor=RED, opacity=0.06, line_width=0)
         fig.add_scatter(x=r.years, y=base[name], name=f"{name} base", mode="lines",
-                        line=dict(color=COLORS[name], dash="dot", width=1.5), opacity=0.45, hoverinfo="skip")
+                        line=dict(color=COLORS[name], dash="dot", width=1.2), opacity=0.4, hoverinfo="skip")
         fig.add_scatter(x=r.years, y=r.ratio[0], name=name, mode="lines+markers",
-                        line=dict(color=COLORS[name], width=2), marker=dict(size=8),
+                        line=dict(color=COLORS[name], width=2.5 if name == "Puma" else 2),
+                        marker=dict(size=7, symbol=PROJECT_SYMBOLS[name]),
                         hovertemplate=f"{name}: %{{y:.3f}}x<extra></extra>")
+        fig.add_annotation(x=r.years[-1], y=r.ratio[0, -1], text=f"<b>{name}</b>", showarrow=False,
+                           xanchor="left", xshift=8, font=dict(color=COLORS[name], size=12))
     ceiling_line(fig, ceiling)
-    return layout(fig, "Slider scenario: leverage by year (shaded = breach year, dotted = base case)")
+    fig = layout(fig, "Net debt / Adj. EBITDA by year (shaded = breach year, dotted = base case)", height=460)
+    fig.update_layout(margin=dict(r=70))
+    return fig
 
 
 def fan_chart(sim: SimResults, name: str, ceiling: float) -> go.Figure:
@@ -110,18 +141,18 @@ def fan_chart(sim: SimResults, name: str, ceiling: float) -> go.Figure:
     fig = go.Figure()
     fig.add_scatter(x=d.Year, y=d.P95, mode="lines", line=dict(width=0, color=c), name="P95", showlegend=False, hovertemplate="P95 %{y:.3f}x<extra></extra>")
     fig.add_scatter(x=d.Year, y=d.P5, mode="lines", line=dict(width=0, color=c), fill="tonexty",
-                    fillcolor=_rgba(c, 0.22), name="P5-P95 band", hovertemplate="P5 %{y:.3f}x<extra></extra>")
+                    fillcolor=_rgba(c, 0.15), name="P5-P95 band", hovertemplate="P5 %{y:.3f}x<extra></extra>")
     fig.add_scatter(x=d.Year, y=d.P50, mode="lines", line=dict(color=c, width=2), name="P50",
                     hovertemplate="P50 %{y:.3f}x<extra></extra>")
     ceiling_line(fig, ceiling)
-    return layout(fig, f"{name}: ratio fan chart", height=360)
+    return layout(fig, f"{name}: P5 to P95 range by year", height=360)
 
 
 def histogram(sim: SimResults, metric: str, ceiling: float) -> go.Figure:
     fig = go.Figure()
     for name, r in sim.results.items():
         x = r.peak if metric == "Peak ratio" else r.post_build_peak
-        fig.add_histogram(x=x, name=name, marker_color=COLORS[name], opacity=0.7, xbins=dict(size=0.01),
+        fig.add_histogram(x=x, name=name, marker_color=COLORS[name], opacity=0.6, xbins=dict(size=0.01),
                           marker_line=dict(color="white", width=0.5),
                           hovertemplate=f"{name}<br>%{{x}}<br>%{{y}} scenarios<extra></extra>")
     fig.update_layout(barmode="overlay")
@@ -143,11 +174,11 @@ def tornado_chart(df: pd.DataFrame, name: str, metric: str) -> go.Figure:
     d = d.sort_values("swing")
     labels = [f"{i}{' (extra)' if e else ''}" for i, e in zip(d.Input, d["Extra lever"])]
     fig = go.Figure()
-    for col, lab, color in ((lo_col, "Input at P10", "#6250d6"), (hi_col, "Input at P90", "#eda100")):
+    for col, lab, color in ((lo_col, "Input at P10", LOW_COLOR), (hi_col, "Input at P90", HIGH_COLOR)):
         fig.add_bar(y=labels, x=d[col] - base, base=base, orientation="h", name=lab, marker_color=color,
                     customdata=np.c_[d[col], d["P10 value" if col == lo_col else "P90 value"]],
                     hovertemplate="%{y}<br>input = %{customdata[1]:.3f}<br>ratio = %{customdata[0]:.3f}x<extra>" + lab + "</extra>")
-    fig.add_vline(x=base, line_color="gray", line_width=1)
+    fig.add_vline(x=base, line_color=INK, line_width=1)
     fig.update_layout(barmode="group", bargap=0.3, height=140 + 40 * len(d),
                       title=f"{name} tornado (base {base:.3f}x)",
                       margin=dict(l=10, r=10, t=50, b=10), showlegend=False)
@@ -164,10 +195,14 @@ def _rgba(hex_color: str, a: float) -> str:
 def badges(results: dict[str, ProjectResult]) -> None:
     for col, (name, r) in zip(st.columns(len(results)), results.items()):
         ok = bool(r.passed[0])
-        col.metric(f"{name}: {'✅ PASS' if ok else '❌ FAIL'}", f"{r.peak[0]:.3f}x peak in {r.peak_year[0]}")
-        col.markdown(f"Post-build peak: **{r.post_build_peak[0]:.3f}x**")
-        if r.peak_in_build[0]:
-            col.caption(BUILD_NOTE)
+        status, tone = ("PASS", TEAL) if ok else ("FAIL", RED)
+        note = f'<div class="note">{BUILD_NOTE}</div>' if r.peak_in_build[0] else ""
+        col.markdown(
+            f'<div class="badge"><span class="name" style="color:{COLORS[name]}">{name}</span>'
+            f'<span class="status" style="color:{tone}">{"✓" if ok else "✕"} {status}</span>'
+            f'<div class="big" style="color:{tone if not ok else INK}">{r.peak[0]:.2f}x</div>'
+            f'<div class="sub">Peak in {r.peak_year[0]} · post-build peak {r.post_build_peak[0]:.2f}x</div>{note}</div>',
+            unsafe_allow_html=True)
 
 
 SUMMARY_FMT = {"Pass rate": "{:.1%}", "Fail rate": "{:.1%}", "Peak in build year (share)": "{:.1%}",
@@ -175,7 +210,8 @@ SUMMARY_FMT = {"Pass rate": "{:.1%}", "Fail rate": "{:.1%}", "Peak in build year
 
 
 def mc_section(sim: SimResults, tor: pd.DataFrame, ceiling: float) -> None:
-    st.subheader(f"Monte Carlo results ({sim.config.n_scenarios:,} scenarios, seed {sim.config.seed})")
+    st.markdown(kicker("Monte Carlo"), unsafe_allow_html=True)
+    st.subheader(f"Results across {sim.config.n_scenarios:,} scenarios (seed {sim.config.seed})")
     cols = ["Project", "Pass rate", "Peak P50", "Peak P95", "Most common breach year", "Peak in build year (share)",
             "Post-build peak P50", "Post-build peak P95", "Post-build breach rate"]
     st.dataframe(sim.summary[cols].style.format(SUMMARY_FMT | {c: "{:.3f}" for c in cols if "P50" in c or "P95" in c},
@@ -184,13 +220,14 @@ def mc_section(sim: SimResults, tor: pd.DataFrame, ceiling: float) -> None:
         if r.peak_in_build.mean() > 0.5:
             st.caption(f"**{name}**: {r.peak_in_build.mean():.0%} of scenarios peak in a build year. {BUILD_NOTE}")
     for col, name in zip(st.columns(3), PROJECTS):
-        col.plotly_chart(fan_chart(sim, name, ceiling), width="stretch")
+        chart(fan_chart(sim, name, ceiling), col)
     metric = st.radio("Metric for histogram and tornado", ["Peak ratio", "Post-build peak"], horizontal=True)
-    st.plotly_chart(histogram(sim, metric, ceiling), width="stretch")
-    st.caption("Tornado: everything at base, one input moved to its P10 (purple bar) or P90 (gold bar). "
+    chart(histogram(sim, metric, ceiling))
+    st.markdown(kicker("Sensitivity"), unsafe_allow_html=True)
+    st.caption("Tornado: everything at base, one input moved to its P10 (dark gray bar) or P90 (light gray bar). "
                "Hover a bar for the input value. (extra) = lever outside Exhibits 5-9.")
     for col, name in zip(st.columns(3), PROJECTS):
-        col.plotly_chart(tornado_chart(tor, name, metric), width="stretch")
+        chart(tornado_chart(tor, name, metric), col)
     with st.expander("Probability of breach by year and full summary"):
         st.dataframe(sim.by_year, hide_index=True, width="stretch")
         st.dataframe(sim.summary, hide_index=True, width="stretch")
@@ -203,14 +240,17 @@ def mc_section(sim: SimResults, tor: pd.DataFrame, ceiling: float) -> None:
 def main() -> None:
     case = get_case()
     ceiling = case.corporate.ceiling
-    st.title("NorthStar leverage Monte Carlo")
+    st.markdown(kicker("Leverage sensitivity") + legend_dots(), unsafe_allow_html=True)
+    st.title(f"How far can each project bend before NorthStar breaks the {ceiling:.2f}x ceiling?")
     st.caption(f"Net debt / Adj. EBITDA must stay at or below {ceiling:.2f}x in every year. "
-               "Sliders update the scenario chart live; the Monte Carlo runs the same model function.")
-    shocks = slider_shocks(case)
-    cfg, run = mc_config()
+               "Sliders update the scenario live; the Monte Carlo runs the same model function.")
+    slider_box, mc_box = st.sidebar.container(), st.sidebar.container()
+    cfg, run = mc_config(mc_box)  # read first: the tariff slider uses its material shares
+    shocks = slider_shocks(case, cfg, slider_box)
     results = run_all(case, shocks)
+    st.markdown(kicker("Slider scenario"), unsafe_allow_html=True)
     badges(results)
-    st.plotly_chart(scenario_chart(results, base_ratios(), ceiling), width="stretch")
+    chart(scenario_chart(results, base_ratios(), ceiling))
     if run:
         with st.spinner("Running scenarios..."):
             st.session_state["sim"] = run_monte_carlo(cfg, case)
@@ -218,7 +258,9 @@ def main() -> None:
     if "sim" in st.session_state:
         mc_section(st.session_state["sim"], st.session_state["tornado"], ceiling)
     else:
-        st.info("Set the Monte Carlo options in the sidebar and press **Run simulation**.")
+        st.caption("Set the Monte Carlo options in the sidebar and press **Run simulation**.")
+    st.markdown('<div class="source">Source: team model (Bison, Fennec and Puma DCF tabs); case Exhibits 1, 2, 5-9 '
+                'and 12. Year-end net debt / Adj. EBITDA.</div>', unsafe_allow_html=True)
 
 
 main()

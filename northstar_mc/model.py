@@ -94,6 +94,11 @@ def project_prices(case: CaseData, p: Project, s: Shocks) -> tuple[np.ndarray, .
     return crude, gas, ngl
 
 
+def opex_index(p: Project, s: Shocks) -> np.ndarray:
+    """Unexpected opex escalation, compounding from 2027 (1.0 in the base case)."""
+    return (1 + s.opex_growth[:, None]) ** (p.years[None, :] - FIRST_YEAR)
+
+
 def operating_model(case: CaseData, p: Project, s: Shocks) -> dict[str, np.ndarray]:
     """DCF rows 17-40: production through unlevered FCF."""
     c, t, n = case.constants, p.n_years, s.n
@@ -104,13 +109,15 @@ def operating_model(case: CaseData, p: Project, s: Shocks) -> dict[str, np.ndarr
     crude_px, gas_px, ngl_px = project_prices(case, p, s)
     gas_boe = gas_px * c.mcf_per_boe * c.mmbtu_per_mcf
     revenue = volume * (crude_sh * crude_px + gas_sh * gas_boe + ngl_sh * ngl_px)
-    ebitda = revenue * (1 - p.royalty) - volume * p.unit_cost
+    tariff_on = p.years[None, :] >= s.tariff_year[:, None]
+    unit_cost = p.unit_cost * opex_index(p, s) * (1 + s.tariff_opex_uplift[:, None] * tariff_on)
+    ebitda = revenue * (1 - p.royalty) - volume * unit_cost
 
     cost = p.dev_cost * s.capex[p.name][:, None]
     idx = np.arange(t)[None, :]
-    depreciation = np.where(production > 0, cost / p.dep_life, 0.0)
+    capex = np.where(idx < p.dev_years, cost / p.dev_years, 0.0) * (1 + s.tariff_capex_uplift[:, None] * tariff_on)
+    depreciation = np.where(production > 0, capex.sum(axis=1, keepdims=True) / p.dep_life, 0.0)
     tax = case.corporate.tax_rate * (ebitda - depreciation)  # negative = credit, as in workbook
-    capex = np.where(idx < p.dev_years, cost / p.dev_years, 0.0) * np.ones((n, 1))
     decom = np.where(idx == p.dev_years + p.dep_life - 1, p.decom, 0.0) * np.ones((n, 1))
     fcf = ebitda - tax - capex - decom
     return {"production": production, "revenue": revenue, "ebitda": ebitda, "fcf": fcf}

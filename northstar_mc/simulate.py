@@ -15,9 +15,10 @@ import pandas as pd
 
 from data_loader import BENCHMARKS, PROJECTS, CaseData, load_case
 from model import ProjectResult, run_all
-from shocks import ShockConfig, Shocks, base_shocks, draw_shocks, input_quantiles
+from shocks import NO_TARIFF, ShockConfig, Shocks, base_shocks, draw_shocks, input_quantiles, set_tariff
 
 PERCENTILES = (5, 25, 50, 75, 95)
+EXTRA_KEYS = ("Baseline EBITDA growth", "Opex growth", "Tariff event")
 
 
 @dataclass
@@ -73,6 +74,8 @@ def scenario_table(s: Shocks, results: dict[str, ProjectResult]) -> pd.DataFrame
         df["Capex mult"] = s.capex[name]
         df["Delay (years)"] = s.delay[name]
         df["Baseline EBITDA growth"] = s.ebitda_growth
+        df["Tariff start year"] = np.where(s.tariff_year == NO_TARIFF, np.nan, s.tariff_year)
+        df["Opex growth"] = s.opex_growth
         df["Peak ratio"], df["Peak year"] = r.peak, r.peak_year
         df["Post-build peak"] = r.post_build_peak
         df["Result"] = np.where(r.passed, "PASS", "FAIL")
@@ -95,7 +98,7 @@ def run_monte_carlo(cfg: ShockConfig, case: CaseData | None = None) -> SimResult
     )
 
 
-def _set_input(s: Shocks, key: str, value: float) -> None:
+def _set_input(s: Shocks, key: str, value: float, cfg: ShockConfig) -> None:
     kind, _, target = key.partition(" ")
     if kind == "Volume":
         s.volume[target][:] = value
@@ -109,6 +112,10 @@ def _set_input(s: Shocks, key: str, value: float) -> None:
         s.crude_shift[:] = value
     elif key == "Baseline EBITDA growth":
         s.ebitda_growth[:] = value
+    elif key == "Opex growth":
+        s.opex_growth[:] = value
+    elif key == "Tariff event" and value:
+        set_tariff(s, cfg, cfg.tariff_window[0], cfg.tariff_rate)
 
 
 def _relevant(key: str, project: str, case: CaseData) -> bool:
@@ -128,14 +135,14 @@ def tornado(cfg: ShockConfig, case: CaseData | None = None, lo_q: float = 0.10, 
     lows, highs = input_quantiles(cfg, lo_q), input_quantiles(cfg, hi_q)
     rows = []
     for key in lows:
-        extra = key.split(" ")[0] in ("Capex", "Delay") or key == "Baseline EBITDA growth"
+        extra = key.split(" ")[0] in ("Capex", "Delay") or key in EXTRA_KEYS
         for project in PROJECTS:
             if not _relevant(key, project, case):
                 continue
             out = {}
             for side, value in (("low", lows[key]), ("high", highs[key])):
                 s = base_shocks(case)
-                _set_input(s, key, value)
+                _set_input(s, key, value, cfg)
                 r = run_all(case, s)[project]
                 out[side] = (value, r.peak[0], r.post_build_peak[0])
             b = base[project]
@@ -177,12 +184,15 @@ def main() -> None:
     ap.add_argument("-n", "--scenarios", type=int, default=10_000)
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--extra-levers", action="store_true")
+    ap.add_argument("--tariff", action="store_true", help="tariff event risk on steel / materials")
+    ap.add_argument("--opex-growth", action="store_true", help="unexpected opex escalation")
     ap.add_argument("--year-noise", action="store_true")
     ap.add_argument("--mean-reverting", action="store_true")
     ap.add_argument("--out", default="outputs")
     a = ap.parse_args()
     cfg = ShockConfig(n_scenarios=a.scenarios, seed=a.seed, extra_levers=a.extra_levers,
-                      volume_year_noise=a.year_noise, mean_reverting_prices=a.mean_reverting)
+                      volume_year_noise=a.year_noise, mean_reverting_prices=a.mean_reverting,
+                      tariff_event=a.tariff, opex_growth=a.opex_growth)
     sim = run_monte_carlo(cfg)
     tor = tornado(cfg)
     out = Path(a.out)

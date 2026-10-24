@@ -14,6 +14,8 @@ import numpy as np
 
 from data_loader import BENCHMARKS, PROJECTS, CaseData
 
+NO_TARIFF = 9999  # tariff_year value meaning no tariff in this scenario
+
 # [ASSUMPTION] price correlation, order = BENCHMARKS (WTI, Brent, HH, TTF, OPIS)
 DEFAULT_CORRELATION = np.array([
     [1.00, 0.95, 0.30, 0.30, 0.70],
@@ -48,6 +50,17 @@ class ShockConfig:
     delay_probs: tuple[float, float, float] = (0.70, 0.20, 0.10)       # 0, 1, 2 years
     ebitda_growth_mean: float = 0.03
     ebitda_growth_sigma: float = 0.015
+    # E. tariff event and unexpected opex growth (extra levers, each with its own toggle)
+    tariff_event: bool = False
+    tariff_probability: float = 0.30           # chance a tariff starts during the window
+    tariff_window: tuple[int, int] = (2027, 2036)  # first / last year it can start (uniform)
+    tariff_rate: float = 0.25                  # duty on steel and other imported materials
+    capex_material_share: float = 0.35         # share of development capex that is steel / materials
+    opex_material_share: float = 0.10          # share of opex that is materials and spares
+    opex_growth: bool = False
+    opex_growth_mean: float = 0.01             # unexpected opex escalation per year, above plan
+    opex_growth_sigma: float = 0.015
+    opex_growth_clip: tuple[float, float] = (-0.02, 0.08)
 
 
 @dataclass
@@ -59,6 +72,10 @@ class Shocks:
     capex: dict[str, np.ndarray]
     delay: dict[str, np.ndarray]
     ebitda_growth: np.ndarray
+    tariff_year: np.ndarray        # calendar year the tariff starts; NO_TARIFF = never
+    tariff_capex_uplift: np.ndarray  # tariff rate x capex material share, from tariff_year on
+    tariff_opex_uplift: np.ndarray   # tariff rate x opex material share, from tariff_year on
+    opex_growth: np.ndarray        # unexpected opex escalation per year from 2027
 
     @property
     def n(self) -> int:
@@ -80,7 +97,18 @@ def base_shocks(case: CaseData, n: int = 1) -> Shocks:
         capex={p: np.ones(n) for p in PROJECTS},
         delay={p: np.zeros(n, dtype=int) for p in PROJECTS},
         ebitda_growth=np.full(n, case.corporate.ebitda_growth),
+        tariff_year=np.full(n, NO_TARIFF),
+        tariff_capex_uplift=np.zeros(n),
+        tariff_opex_uplift=np.zeros(n),
+        opex_growth=np.zeros(n),
     )
+
+
+def set_tariff(s: Shocks, cfg: ShockConfig, start_year: np.ndarray | int, rate: np.ndarray | float) -> None:
+    """Tariff from start_year onward; rate 0 or NO_TARIFF means no tariff."""
+    s.tariff_year[:] = start_year
+    s.tariff_capex_uplift[:] = rate * cfg.capex_material_share
+    s.tariff_opex_uplift[:] = rate * cfg.opex_material_share
 
 
 def _volume(cfg: ShockConfig, z_level: np.ndarray, z_year: np.ndarray, sigma: float) -> np.ndarray:
@@ -141,6 +169,9 @@ def draw_shocks(case: CaseData, cfg: ShockConfig) -> Shocks:
     u_capex = rng.random((n, len(PROJECTS)))
     u_delay = rng.random((n, len(PROJECTS)))
     z_growth = rng.standard_normal(n)
+    u_tariff = rng.random(n)        # drawn last, so earlier draws keep their values
+    u_tariff_year = rng.random(n)
+    z_opex = rng.standard_normal(n)
 
     shocks = base_shocks(case, n)
     shocks.volume = {
@@ -154,6 +185,12 @@ def draw_shocks(case: CaseData, cfg: ShockConfig) -> Shocks:
         shocks.capex = {p: _triangular_ppf(u_capex[:, i], lo, mode, hi) for i, p in enumerate(PROJECTS)}
         shocks.delay = {p: _delay(u_delay[:, i], cfg.delay_probs) for i, p in enumerate(PROJECTS)}
         shocks.ebitda_growth = cfg.ebitda_growth_mean + cfg.ebitda_growth_sigma * z_growth
+    if cfg.tariff_event:  # one macro event per scenario, shared by all three projects
+        first, last = cfg.tariff_window
+        year = first + np.floor(u_tariff_year * (last - first + 1)).astype(int)
+        set_tariff(shocks, cfg, np.where(u_tariff < cfg.tariff_probability, year, NO_TARIFF), cfg.tariff_rate)
+    if cfg.opex_growth:
+        shocks.opex_growth = np.clip(cfg.opex_growth_mean + cfg.opex_growth_sigma * z_opex, *cfg.opex_growth_clip)
     return shocks
 
 
@@ -177,4 +214,6 @@ def input_quantiles(cfg: ShockConfig, q: float) -> dict[str, float]:
         out[f"Capex {p}"] = float(_triangular_ppf(q, *cfg.capex_triangular))
         out[f"Delay {p}"] = float(np.searchsorted(_delay_cdf(cfg.delay_probs), q, side="left"))
     out["Baseline EBITDA growth"] = cfg.ebitda_growth_mean + z * cfg.ebitda_growth_sigma
+    out["Opex growth"] = float(np.clip(cfg.opex_growth_mean + z * cfg.opex_growth_sigma, *cfg.opex_growth_clip))
+    out["Tariff event"] = float(q > 1 - cfg.tariff_probability)  # 0 = none, 1 = tariff from first window year
     return out
