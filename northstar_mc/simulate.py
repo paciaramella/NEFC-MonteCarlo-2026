@@ -68,7 +68,6 @@ def scenario_table(s: Shocks, results: dict[str, ProjectResult]) -> pd.DataFrame
         t = len(r.years)
         df = pd.DataFrame({"Scenario": np.arange(s.n), "Project": name})
         df["Volume mult (avg)"] = s.volume[name][:, :t].mean(axis=1)
-        df["Crude share shift (pp)"] = s.crude_shift * 100
         for b in BENCHMARKS:
             df[f"{b} mult (avg)"] = s.price[b][:, :t].mean(axis=1)
         df["Capex mult"] = s.capex[name]
@@ -108,8 +107,6 @@ def _set_input(s: Shocks, key: str, value: float, cfg: ShockConfig) -> None:
         s.capex[target][:] = value
     elif kind == "Delay":
         s.delay[target][:] = int(value)
-    elif key == "Crude share shift":
-        s.crude_shift[:] = value
     elif key == "Baseline EBITDA growth":
         s.ebitda_growth[:] = value
     elif key == "Opex growth":

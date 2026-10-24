@@ -35,9 +35,6 @@ class ShockConfig:
     volume_year_noise: bool = False
     volume_year_sigma: float = 0.03
     volume_clip: tuple[float, float] = (0.5, 1.5)
-    # B. product mix (percentage points as fractions)
-    crude_shift_sigma: float = 0.03
-    crude_shift_clip: float = 0.10
     # C. prices
     price_vol: dict[str, float] = field(default_factory=lambda: {"WTI": 0.25, "Brent": 0.25, "HH": 0.35, "TTF": 0.40, "OPIS": 0.25})
     price_correlation: np.ndarray = field(default_factory=lambda: DEFAULT_CORRELATION.copy())
@@ -70,7 +67,6 @@ class ShockConfig:
 class Shocks:
     """One row per scenario. Price and volume multipliers are [n, years from 2027]."""
     volume: dict[str, np.ndarray]
-    crude_shift: np.ndarray
     price: dict[str, np.ndarray]
     capex: dict[str, np.ndarray]
     delay: dict[str, np.ndarray]
@@ -83,7 +79,7 @@ class Shocks:
 
     @property
     def n(self) -> int:
-        return len(self.crude_shift)
+        return len(self.ebitda_growth)
 
 
 def lognormal_mean_one(z: np.ndarray, sigma: float) -> np.ndarray:
@@ -96,7 +92,6 @@ def base_shocks(case: CaseData, n: int = 1, cfg: ShockConfig | None = None) -> S
     t = case.max_years
     return Shocks(
         volume={p: np.ones((n, t)) for p in PROJECTS},
-        crude_shift=np.zeros(n),
         price={b: np.ones((n, t)) for b in BENCHMARKS},
         capex={p: np.ones(n) for p in PROJECTS},
         delay={p: np.zeros(n, dtype=int) for p in PROJECTS},
@@ -169,7 +164,7 @@ def draw_shocks(case: CaseData, cfg: ShockConfig) -> Shocks:
     rng = np.random.default_rng(cfg.seed)
     z_vol = rng.standard_normal((n, len(PROJECTS)))
     z_vol_year = rng.standard_normal((n, t, len(PROJECTS)))
-    z_mix = rng.standard_normal(n)
+    rng.standard_normal(n)  # was the crude share shift; still drawn so later draws keep their values
     z_price = rng.standard_normal((n, t, len(BENCHMARKS)))
     u_capex = rng.random((n, len(PROJECTS)))
     u_delay = rng.random((n, len(PROJECTS)))
@@ -182,8 +177,6 @@ def draw_shocks(case: CaseData, cfg: ShockConfig) -> Shocks:
     shocks.volume = {
         p: _volume(cfg, z_vol[:, i], z_vol_year[:, :, i], cfg.volume_sigma[p]) for i, p in enumerate(PROJECTS)
     }
-    lim = cfg.crude_shift_clip
-    shocks.crude_shift = np.clip(z_mix * cfg.crude_shift_sigma, -lim, lim)
     shocks.price = _price_paths(cfg, z_price)
     if cfg.extra_levers:
         lo, mode, hi = cfg.capex_triangular
@@ -212,7 +205,6 @@ def input_quantiles(cfg: ShockConfig, q: float) -> dict[str, float]:
     """Quantile q of each single input's own distribution, for the tornado chart."""
     z = NormalDist().inv_cdf(q)
     out = {f"Volume {p}": float(np.clip(lognormal_mean_one(z, s), *cfg.volume_clip)) for p, s in cfg.volume_sigma.items()}
-    out["Crude share shift"] = float(np.clip(z * cfg.crude_shift_sigma, -cfg.crude_shift_clip, cfg.crude_shift_clip))
     for b in BENCHMARKS:
         out[f"Price {b}"] = float(np.clip(lognormal_mean_one(z, cfg.price_vol[b]), *cfg.price_clip))
     for p in PROJECTS:

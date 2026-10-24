@@ -72,16 +72,6 @@ def shift_right(a: np.ndarray, delay: np.ndarray) -> np.ndarray:
     return out
 
 
-def shifted_mix(p: Project, shift: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Move crude share by `shift`, take it from gas and NGL pro rata. Shares stay in [0, 1]."""
-    crude0, gas0, ngl0 = p.crude_share[None, :], p.gas_share[None, :], p.ngl_share[None, :]
-    producing = (crude0 + gas0 + ngl0) > 0
-    other0 = gas0 + ngl0
-    crude = np.where(producing, np.clip(crude0 + shift[:, None], 0.0, crude0 + other0), 0.0)
-    scale = np.divide(crude0 + other0 - crude, other0, out=np.zeros_like(crude), where=other0 > 0)
-    return crude, gas0 * scale, ngl0 * scale
-
-
 def project_prices(case: CaseData, p: Project, s: Shocks) -> tuple[np.ndarray, ...]:
     """Crude, gas ($/MMBtu) and NGL price paths for the project's benchmarks."""
     t = p.n_years
@@ -107,7 +97,8 @@ def operating_model(case: CaseData, p: Project, s: Shocks) -> dict[str, np.ndarr
     delay = s.delay[p.name]
     production = shift_right(p.mboed[None, :] * s.volume[p.name][:, :t], delay)
     volume = production * 1000 * c.days / 1e6
-    crude_sh, gas_sh, ngl_sh = (shift_right(x, delay) for x in shifted_mix(p, s.crude_shift))
+    crude_sh, gas_sh, ngl_sh = (shift_right(np.broadcast_to(x, (n, t)), delay)
+                                for x in (p.crude_share, p.gas_share, p.ngl_share))
     crude_px, gas_px, ngl_px = project_prices(case, p, s)
     gas_boe = gas_px * c.mcf_per_boe * c.mmbtu_per_mcf
     revenue = volume * (crude_sh * crude_px + gas_sh * gas_boe + ngl_sh * ngl_px)

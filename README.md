@@ -36,12 +36,12 @@ All exhibit numbers come from the workbook, so editing an exhibit changes the mo
 | Scenarios / seed | 10,000 / 2026 |
 | Volume multiplier (one per project, all producing years) | lognormal, mean 1, σ = 10% Bison, 12% Fennec, 15% Puma, clipped to [0.5, 1.5] |
 | Year-by-year volume noise | off; σ = 3% per year when on |
-| Crude share shift | normal, mean 0, σ = 3 pp, clipped ±10 pp; taken from gas and NGL pro rata |
+| Product mix | fixed at Exhibit 8 (the crude share shift was removed: negligible effect on every result) |
 | Price level multipliers | lognormal, mean 1; vol WTI 25%, Brent 25%, Henry Hub 35%, TTF 40%, OPIS 25%; clipped [0.3, 2.5] |
 | Price correlation | WTI-Brent 0.95, crude-OPIS 0.70, crude-HH 0.30, WTI-TTF 0.30, Brent-TTF 0.35, HH-TTF 0.40, HH-OPIS 0.40, TTF-OPIS 0.35 (Cholesky) |
 | Europe NGL | OPIS × OPIS multiplier + the Exhibit 9 spread ($3) |
 | Mean-reverting prices | off; Ornstein-Uhlenbeck on log price around the Exhibit 9 curve, 3-year half-life, same vol/correlation |
-| Common random numbers | the same price and mix draws are used for all three projects in a scenario |
+| Common random numbers | the same price draws are used for all three projects in a scenario |
 | Capex overrun (extra lever) | off; triangular(0.95, 1.05, 1.40) × Exhibit 1 cost. Also scales depreciation |
 | First-production delay (extra lever) | off; 0 / 1 / 2 years with 70% / 20% / 10%. Shifts production, mix and depreciation right; capex keeps its schedule; tail truncated; decommissioning stays in the original final year |
 | Baseline EBITDA growth (extra lever) | off; normal(3%, 1.5 pp) |

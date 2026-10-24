@@ -33,9 +33,10 @@ def get_case() -> CaseData:
 
 
 @st.cache_data
-def base_ratios() -> dict[str, np.ndarray]:
+def base_series(field: str) -> dict[str, np.ndarray]:
+    """One ProjectResult field ("ratio", "ebitda", ...) per project in the base case."""
     case = get_case()
-    return {k: r.ratio[0] for k, r in run_all(case, base_shocks(case)).items()}
+    return {k: getattr(r, field)[0] for k, r in run_all(case, base_shocks(case)).items()}
 
 
 # ---------- sidebar ----------
@@ -56,14 +57,13 @@ def baseline_settings(case: CaseData, cfg: ShockConfig, sb) -> None:
 
 def slider_shocks(case: CaseData, cfg: ShockConfig, sb) -> Shocks:
     s = base_shocks(case, cfg=cfg)
-    sb.header("Scenario sliders")
-    sb.caption("Prices (multiplier on the Exhibit 9 curve)")
+    sb.header("Scenarios")
+    sb.caption("Commodity price variability as a multiplier (See Exhibit 9)")
     for b in BENCHMARKS:
         s.price[b][:] = sb.slider(BENCH_LABEL[b], 0.3, 2.0, 1.0, 0.05, key=f"px_{b}")
-    sb.caption("Production volume (multiplier on Exhibits 5-7)")
+    sb.caption("Production volume as a multiplier (See Exhibits 5-7)")
     for p in PROJECTS:
         s.volume[p][:] = sb.slider(p, 0.5, 1.5, 1.0, 0.05, key=f"vol_{p}")
-    s.crude_shift[:] = sb.slider("Crude share shift (pp, Exhibit 8)", -10, 10, 0, 1) / 100
     with sb.expander("Extra levers (outside Exhibits 5-9)", expanded=False):
         for p in PROJECTS:
             s.capex[p][:] = 1 + st.slider(f"{p} capex overrun %", -10, 50, 0, 1) / 100
@@ -89,7 +89,6 @@ def mc_config(sb) -> tuple[ShockConfig, bool]:
     cfg.seed = int(sb.number_input("Seed", 0, 10**9, cfg.seed))
     with sb.expander("Distribution settings", expanded=False):
         cfg.volume_sigma = {p: st.number_input(f"Volume σ {p}", 0.0, 0.5, v, 0.01) for p, v in cfg.volume_sigma.items()}
-        cfg.crude_shift_sigma = st.number_input("Crude shift σ (pp)", 0.0, 10.0, 3.0, 0.5) / 100
         cfg.price_vol = {b: st.number_input(f"{BENCH_LABEL[b]} vol", 0.0, 1.0, v, 0.05) for b, v in cfg.price_vol.items()}
         cfg.volume_year_sigma = st.number_input("Year-by-year volume σ", 0.0, 0.2, cfg.volume_year_sigma, 0.01)
         cfg.ebitda_growth_sigma = st.number_input("EBITDA growth σ (pp)", 0.0, 5.0, 1.5, 0.25) / 100
@@ -145,7 +144,25 @@ def scenario_chart(results: dict[str, ProjectResult], base: dict[str, np.ndarray
         fig.add_annotation(x=r.years[-1], y=r.ratio[0, -1], text=f"<b>{name}</b>", showarrow=False,
                            xanchor="left", xshift=8, font=dict(color=COLORS[name], size=12))
     ceiling_line(fig, ceiling)
-    fig = layout(fig, "Net debt / Adj. EBITDA by year (shaded = breach year, dotted = base case)", height=460)
+    fig = layout(fig, "Net debt / Adj. EBITDA by year", height=460)
+    fig.update_layout(margin=dict(r=70))
+    return fig
+
+
+def ebitda_chart(results: dict[str, ProjectResult], base: dict[str, np.ndarray]) -> go.Figure:
+    """Project EBITDA (excluding NorthStar's baseline) in the current scenario, base case dotted."""
+    fig = go.Figure()
+    for name, r in results.items():
+        fig.add_scatter(x=r.years, y=base[name], name=f"{name} base", mode="lines",
+                        line=dict(color=COLORS[name], dash="dot", width=1.2), opacity=0.4, hoverinfo="skip")
+        fig.add_scatter(x=r.years, y=r.ebitda[0], name=name, mode="lines+markers",
+                        line=dict(color=COLORS[name], width=2.5 if name == "Puma" else 2),
+                        marker=dict(size=7, symbol=PROJECT_SYMBOLS[name]),
+                        hovertemplate=f"{name}: $%{{y:,.0f}}MM<extra></extra>")
+        fig.add_annotation(x=r.years[-1], y=r.ebitda[0, -1], text=f"<b>{name}</b>", showarrow=False,
+                           xanchor="left", xshift=8, font=dict(color=COLORS[name], size=12))
+    fig = layout(fig, "Project EBITDA by year (dotted = base case)", height=460, ytitle="Project EBITDA ($MM)")
+    fig.update_yaxes(tickformat=",.0f", tickprefix="$")
     fig.update_layout(margin=dict(r=70))
     return fig
 
@@ -264,9 +281,11 @@ def main() -> None:
     baseline_settings(case, cfg, model_box)
     shocks = slider_shocks(case, cfg, slider_box)
     results = run_all(case, shocks)
-    st.markdown(kicker("Slider scenario"), unsafe_allow_html=True)
+    st.markdown(kicker("Current scenario"), unsafe_allow_html=True)
     badges(results)
-    chart(scenario_chart(results, base_ratios(), ceiling))
+    ratio_col, ebitda_col = st.columns(2)
+    chart(scenario_chart(results, base_series("ratio"), ceiling), ratio_col)
+    chart(ebitda_chart(results, base_series("ebitda")), ebitda_col)
     if run:
         with st.spinner("Running scenarios..."):
             st.session_state["sim"] = run_monte_carlo(cfg, case)
